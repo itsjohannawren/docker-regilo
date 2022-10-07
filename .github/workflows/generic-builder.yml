@@ -1,0 +1,279 @@
+name: generic-builder
+
+on:
+  workflow_call:
+    inputs:
+      docker_push_org:
+        description: ""
+        required: true
+        type: string
+
+  workflow_dispatch:
+      docker_push_org:
+        description: ""
+        required: true
+        type: string
+
+jobs:
+  digest-environment:
+    runs-on: ubuntu-latest
+    outputs:
+      docker_base_org: ${{steps.digest.outputs.docker_base_org}}
+      docker_base_repo: ${{steps.digest.outputs.docker_base_repo}}
+      github_repo_owner: ${{steps.digest.outputs.github_repo_owner}}
+      github_repo: ${{steps.digest.outputs.github_repo}}
+      github_workspace: ${{github.workflow}}
+    steps:
+      - name: Digest environment information
+        id: digest
+        shell: bash
+        run: |
+          DOCKER_BASE_ORG="$(cut -d / -f 1 <<<"${{github.workflow}}")"; \
+          DOCKER_BASE_REPO="$(cut -d / -f 2 <<<"${{github.workflow}}")"; \
+          if ! grep -q / <<<"${{github.workflow}}"; then \
+            DOCKER_BASE_REPO="${DOCKER_BASE_ORG}"; \
+            DOCKER_BASE_ORG="library"; \
+          fi;
+          echo "::set-output name=docker_base_org::$(cut -d / -f 1 <<<"${DOCKER_BASE_ORG}")"; \
+          echo "::set-output name=docker_base_repo::$(cut -d / -f 1 <<<"${DOCKER_BASE_REPO}")"; \
+          echo "::set-output name=github_repo_owner::${GITHUB_REPOSITORY%/*}"; \
+          echo "::set-output name=github_repo::${GITHUB_REPOSITORY#*/}"
+  build:
+    runs-on: ubuntu-latest
+    needs:
+      - digest-environment
+    environment: Docker Hub Automated Build
+    steps:
+      - name: Install QEMU
+        uses: docker/setup-qemu-action@v2
+      - uses: crazy-max/ghaction-github-runtime@v2
+      - name: Install Docker Buildx
+        uses: docker/setup-buildx-action@v2
+      - name: Login to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{secrets.DOCKER_LOGIN}}
+          password: ${{secrets.DOCKER_TOKEN}}
+      - name: Checkout code
+        uses: actions/checkout@v2
+      - name: Create a place for metadata
+        run: |
+          mkdir metadata
+      - name: Gather base image metadata
+        shell: bash
+        run: |
+          PAGE="1"; \
+          while true; do \
+            if ! curl -s "https://registry.hub.docker.com/v2/repositories/${{needs.digest-environment.outputs.docker_base_org}}/${{needs.digest-environment.outputs.docker_base_repo}}/tags?page=${PAGE}" > "metadata/${PAGE}.json"; then \
+              exit 1; \
+            fi
+            if [ "$(jq -r '.next' "metadata/${PAGE}.json")" == "null" ]; then \
+              break; \
+            fi; \
+            PAGE="$((PAGE + 1))"; \
+          done
+      - name: Horrific jq step
+        run: |
+          jq -rs '
+            [
+              # Combine all of the files into one "array"
+              .[] |
+              # Delete some useless entries
+              del(.next,.previous,.count) |
+              # Move into just the result
+              .results[] |
+              # Only keep results that are active
+              select(
+                .tag_status == "active"
+              ) |
+              # Only keep results that appear to be semantically-versioned
+              select(
+                (
+                  .name |
+                  split(".") |
+                  length
+                ) == 3
+              ) |
+              # Only keep results that do not have a version tag (-rc)
+              select(
+                (
+                  .name |
+                  test("-.*";"")
+                ) == false
+              )
+            ] |
+            # Process each result
+            reduce .[] as $result (
+              [];
+              # Process each image in each result
+              . + reduce ($result | .images[]) as $image (
+                [];
+                . + [
+                  # Add fields to each image from its encompassing result
+                  {
+                    # Name, which is the tag
+                    "tag": ($result | .name),
+                    # Group, which is the maj.min version of the tag
+                    "group": (
+                      $result | .name |
+                      match(
+                        "^(\\d+\\.\\d+)"
+                      ) |
+                      .captures[0].string
+                    ),
+                    "os": ($image | .os),
+                    "architecture": ($image | .architecture),
+                    "variant": ($image | .variant)
+                  }
+                ]
+              )
+            ) |
+            # Group by the maj.min version of the tag
+            group_by(.group) |
+            # Sort the groups by the maj.min version of the tag
+            [
+              sort_by (
+                .[0].group
+              )
+            ] |
+            # Sort the images in each group by the name (tag version)
+            reduce .[] as $group (
+              [];
+              . + [
+                $group |
+                .[] |
+                sort_by(
+                  .tag |
+                  split(".") |
+                  map(tonumber)
+                )
+              ]
+            ) |
+            # We need to save this to use in the in()
+            . as $base |
+            # Peel off an array layer
+            .[] |
+            # Group by tag so platform strings can be combined
+            group_by (.tag) |
+            .[] |
+            # Reduce platform strings
+            reduce . as $tag (
+              [];
+              . + [{
+                "tag": ($tag[0].tag),
+                "group": ($tag[0].group),
+                "platforms": (
+                  # Reduce all of the platforms for the tag to one array of platform strings
+                  reduce $tag[] as $platform (
+                    [];
+                    . + [
+                      ($platform | .os) +
+                      "/" +
+                      ($platform | .architecture) +
+                      (
+                        if ($platform | .variant) == null then
+                          ""
+                        else
+                          "/" + ($platform | .variant)
+                        end
+                      )
+                    ]
+                  )
+                )
+              }]
+            ) |
+            .[] |
+            # Filter down to the tags we actually want
+            select(
+              # By name (tag version)
+              .tag |
+              in(
+                # Take the groups down to just the last entry for each group
+                reduce $base[] as $group (
+                  [];
+                  . + [
+                    # Return just name (tag version)
+                    last($group[]) | .tag
+                  ]
+                ) |
+                # Sort the list of names (tag versions)
+                sort_by(
+                  . |
+                  split(".") |
+                  map(tonumber)
+                ) |
+                # Reverse the list
+                reverse |
+                # Only pass on the first 4
+                limit (4; .[]) |
+                # Convert the list to an object of {tag: 1} that in() can use
+                reduce . as $item (
+                  {};
+                  . + {
+                    ($item): 1
+                  }
+                )
+              )
+            ) |
+            (
+              .tag +
+              " " +
+              .group +
+              " " +
+              (.platforms | join(","))
+            )
+          ' metadata/*.json > builds.txt
+      - name: Determine latest base image
+        shell: bash
+        run: |
+          echo "DOCKER_BASE_LATEST=$(tail -n 1 builds.txt | cut -d " " -f 1)" >> $GITHUB_ENV
+      - name: Build images
+        shell: bash
+        run: |
+          while read -r BUILD; do
+            eval set -- "${BUILD}"
+              if [ "${1}" = "${{env.DOCKER_BASE_LATEST}}" ] && [ "${{needs.digest-environment.outputs.docker_base_repo}}" = "alpine" ]; then \
+                docker buildx build \
+                  --build-arg DOCKER_BASE_TAG=${1} \
+                  -f Dockerfile.${{needs.digest-environment.outputs.docker_base_repo}} \
+                  --push \
+                  --tag ${{inputs.docker_push_org}}/${{needs.digest-environment.outputs.github_repo}}:latest \
+                  --tag ${{inputs.docker_push_org}}/${{needs.digest-environment.outputs.github_repo}}:${1} \
+                  --tag ${{inputs.docker_push_org}}/${{needs.digest-environment.outputs.github_repo}}:${2} \
+                  --tag ${{inputs.docker_push_org}}/${{needs.digest-environment.outputs.github_repo}}:${{needs.digest-environment.outputs.docker_base_repo}}-latest \
+                  --tag ${{inputs.docker_push_org}}/${{needs.digest-environment.outputs.github_repo}}:${{needs.digest-environment.outputs.docker_base_repo}}-${1} \
+                  --tag ${{inputs.docker_push_org}}/${{needs.digest-environment.outputs.github_repo}}:${{needs.digest-environment.outputs.docker_base_repo}}-${2} \
+                  --platform ${3} \
+                  .; \
+              elif [ "${DOCKER_BASE_REPO}" = "alpine" ]; then \
+                docker buildx build \
+                  --build-arg DOCKER_BASE_TAG=${1} \
+                  -f Dockerfile.${{needs.digest-environment.outputs.docker_base_repo}} \
+                  --push \
+                  --tag ${{inputs.docker_push_org}}/${{needs.digest-environment.outputs.github_repo}}:${1} \
+                  --tag ${{inputs.docker_push_org}}/${{needs.digest-environment.outputs.github_repo}}:${2} \
+                  --tag ${{inputs.docker_push_org}}/${{needs.digest-environment.outputs.github_repo}}:${{needs.digest-environment.outputs.docker_base_repo}}-${1} \
+                  --tag ${{inputs.docker_push_org}}/${{needs.digest-environment.outputs.github_repo}}:${{needs.digest-environment.outputs.docker_base_repo}}-${2} \
+                  --platform ${3} \
+                  .; \
+              elif [ "${1}" = "${{env.DOCKER_BASE_LATEST}}" ]; then \
+                docker buildx build \
+                  --build-arg DOCKER_BASE_TAG=${1} \
+                  -f Dockerfile.${{needs.digest-environment.outputs.docker_base_repo}} \
+                  --push \
+                  --tag ${{inputs.docker_push_org}}/${{needs.digest-environment.outputs.github_repo}}:${{needs.digest-environment.outputs.docker_base_repo}}-latest \
+                  --tag ${{inputs.docker_push_org}}/${{needs.digest-environment.outputs.github_repo}}:${{needs.digest-environment.outputs.docker_base_repo}}-${1} \
+                  --tag ${{inputs.docker_push_org}}/${{needs.digest-environment.outputs.github_repo}}:${{needs.digest-environment.outputs.docker_base_repo}}-${2} \
+                  --platform ${3} \
+                  .; \
+              else \
+                docker buildx build \
+                  --build-arg DOCKER_BASE_TAG=${1} \
+                  -f Dockerfile.${{needs.digest-environment.outputs.docker_base_repo}} \
+                  --push \
+                  --tag ${{inputs.docker_push_org}}/${{needs.digest-environment.outputs.github_repo}}:${{needs.digest-environment.outputs.docker_base_repo}}-${1} \
+                  --tag ${{inputs.docker_push_org}}/${{needs.digest-environment.outputs.github_repo}}:${{needs.digest-environment.outputs.docker_base_repo}}-${2} \
+                  --platform ${3} \
+                  .; \
+              fi; \
+          done < builds.txt

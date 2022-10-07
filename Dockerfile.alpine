@@ -1,4 +1,6 @@
-FROM alpine:3.16
+# syntax=docker/dockerfile:1
+ARG DOCKER_BASE_TAG=latest
+FROM alpine:${DOCKER_BASE_TAG}
 VOLUME /var/startup
 COPY requirements.txt regilo.py /
 RUN \

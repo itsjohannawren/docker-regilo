@@ -40,6 +40,7 @@ from icecream import ic
 
 # ==============================================================================
 
+CONFIG_JSON = "/etc/regilo.json"
 STARTUP_STATE_PATH = "/var/startup"
 INDENT_STRING = "   "
 
@@ -641,7 +642,7 @@ def main ():
 	signal.signal (signal.SIGPIPE, signalHandler)
 
 	try:
-		with open ("config.json", "r") as file:
+		with open (CONFIG_JSON, "r") as file:
 			CONFIG = json.load (file)
 
 		banner_print (

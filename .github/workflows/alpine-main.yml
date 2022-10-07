@@ -1,0 +1,12 @@
+name: alpine
+
+on:
+  push:
+    branches: main
+
+jobs:
+  alpine:
+    uses: ./.github/workflows/generic-builder.yml
+    with:
+      docker_push_org: itsjohannawren
+    secrets: inherit
