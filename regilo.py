@@ -11,7 +11,7 @@ while [ "${__DIR__}" != "/" ]; do
 	if [ -f "${__DIR__}/pyvenv.cfg" ] && [ -f "${__DIR__}/bin/activate" ] && [ -h "${__DIR__}/bin/python" ]; then
 		exec "${__DIR__}/bin/python" "${0}" "${@}"
 	fi
-	__DIR__="$(dirname "${DIR}")"
+	__DIR__="$(dirname "${__DIR__}")"
 done
 
 exec "python3" "${0}" "${@}"
@@ -40,9 +40,10 @@ from icecream import ic
 
 # ==============================================================================
 
-CONFIG_JSON = "/etc/regilo.json"
-STARTUP_STATE_PATH = "/var/startup"
 INDENT_STRING = "   "
+CONFIG_JSON = "regilo.json"
+STARTUP_STATE_PATH = "var/startup"
+ENV_PATH = "env"
 
 # ==============================================================================
 
@@ -233,6 +234,11 @@ def separator (character:str = "-", width:int = 80, color:bool = True, pad:bool 
 # ==============================================================================
 
 def banner_print (
+	banner_string:str,
+	banner_colors:list[dict],
+	banner_indent:int,
+	title_spaces:int,
+
 	title:str,
 	subtitle:str = None,
 	description:str = None,
@@ -243,45 +249,33 @@ def banner_print (
 
 	color:bool = True
 ):
-	banner = """
-%%%%s                        ____            ____
-        _      ______ _/ / /____  _____/ __/___ ___
-       | | /| / / __ `/ / __/ _ \\/ ___/ /_/ __ `__ \\
-       | |/ |/ / /_/ / / /_/  __/ /  / __/ / / / / /
-       |__/|__/\\__,_/_/\\__/\\___/_(_)/_/ /_/ /_/ /_/
-%%%%s   _______________________________________________  _____    ___
-  /                                              / /    /   /  /
- /%%%%s  %%s%%%%s%%-%is  %%%%s/ /    /   /  /
-/______________________________________________/ /____/   /__/%%%%s"""
-	banner_space = 42
-	banner_indent = 4
-
-	padding = banner_space - len (title)
+	padding = title_spaces - len (title)
 	if padding <= 1:
 		subtitle = None
 	if padding < 0:
-		title = title [0:banner_space]
+		title = title [0:title_spaces]
 
 	if subtitle is not None and padding - len (subtitle) - 1 < 0:
 		subtitle = subtitle [0:padding -1]
 
-	banner = banner % (padding,)
+	banner = banner_string % (padding,)
 	banner = banner % (
 		title,
 		" " + subtitle if subtitle is not None else ""
 	)
 
 	if color == True:
-		print (banner % (
-			ansiColor (reset = True, bright = True, foreground = "white"),
-			ansiColor (reset = True, foreground = "magenta"),
-			ansiColor (reset = True, bright = True, italic = True, foreground = "white"),
-			ansiColor (reset = True, italic = True),
-			ansiColor (reset = True, foreground = "magenta"),
-			ansiColor (reset = True)
-		))
+		colors = []
+		for color in banner_colors:
+			colors.append (ansiColor (**color))
+		colors = tuple (colors)
+
+		print (banner % colors)
 	else:
-		print (banner % ("", "", "", "", "", ""))
+		colors = []
+		for color in banner_colors:
+			colors.append ("")
+		print (banner % colors)
 
 	if description is not None and len (description) > 0:
 		print ("")
@@ -480,6 +474,24 @@ def fillTemplate (task:dict, environment:dict = {}):
 
 # ------------------------------------------------------------------------------
 
+def pathToTree (path:str, owner:str = None, group:str = None, permissions:str = None) -> dict:
+	elements = path.split ("/")
+	if path [0] == "/":
+		elements [0] = "/" + elements [0]
+
+	tree = {}
+	node = tree
+	for element in elements:
+		node [element] = {
+			"owner": owner,
+			"group": group,
+			"permissions": permissions,
+			"tree": {}
+		}
+		node = node [element]["tree"]
+
+	return tree
+
 def ensureTree (tree:dict, path:str = ""):
 	for entry_name, entry in tree.items ():
 		wrapOutput ("mkdir %s%s " % (path, entry_name))
@@ -646,6 +658,11 @@ def main ():
 			CONFIG = json.load (file)
 
 		banner_print (
+			banner_string = "\n".join (CONFIG ["banner"]["lines"]),
+			banner_colors = CONFIG ["banner"]["colors"],
+			banner_indent = CONFIG ["banner"]["indent"],
+			title_spaces = CONFIG ["banner"]["title-spaces"],
+
 			title = CONFIG ["title"],
 			subtitle = CONFIG ["subtitle"],
 			description = CONFIG ["description"],
@@ -656,8 +673,8 @@ def main ():
 
 		separator ()
 
-		info ("Writing /env")
-		with open ("env", "w") as file:
+		info ("Writing %s" % (ENV_PATH,))
+		with open (ENV_PATH, "w") as file:
 			for key, value in CONFIG ["environment"].items ():
 				if key not in os.environ:
 					file.write ("%s=\"%s\"\n" % (key, shlex.quote (value)))
@@ -667,13 +684,7 @@ def main ():
 		wrapOutput ("   written")
 
 		info ("Ensuring needed directory structure")
-		ensureTree ({
-			"var": {
-				"tree": {
-					"startup": {}
-				}
-			}
-		})
+		ensureTree (pathToTree (STARTUP_STATE_PATH))
 
 		for _, task in enumerate (CONFIG ["startup"]):
 			if task ["type"] == "exec":
