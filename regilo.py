@@ -18,7 +18,6 @@ exec "python3" "${0}" "${@}"
 # """
 # ==============================================================================
 
-import asyncio
 import datetime
 import grp
 import hashlib
@@ -36,14 +35,14 @@ import threading
 import time
 
 from croniter import croniter
-from icecream import ic
+#from icecream import ic
 
 # ==============================================================================
 
 INDENT_STRING = "   "
-CONFIG_JSON = "regilo.json"
-STARTUP_STATE_PATH = "var/startup"
-ENV_PATH = "env"
+CONFIG_JSON = "/etc/regilo.json"
+STARTUP_STATE_PATH = "/var/startup"
+ENV_PATH = "/env"
 
 # ==============================================================================
 
