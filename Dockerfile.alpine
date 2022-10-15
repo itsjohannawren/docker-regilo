@@ -4,7 +4,7 @@ FROM alpine:${DOCKER_BASE_TAG}
 VOLUME /var/startup
 COPY requirements.txt regilo.py /
 RUN \
-	apk add --no-cache python3 py3-pip && \
+	apk add --no-cache python3 py3-pip bash && \
 	pip3 install -r /requirements.txt && \
 	apk del py3-pip && \
 	rm -f /requirements.txt
